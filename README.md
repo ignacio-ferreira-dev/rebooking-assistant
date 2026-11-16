@@ -33,3 +33,22 @@ In `assistant/retrieval.py`, write `recall_at_k` (its comment explains it), run
 ## Rules
 
 Do not change `check.py` or the `tests` folder. When you finish, commit, push to your repository and paste its link.
+
+## Project layout (after the refactor)
+
+| Path | What it holds |
+|---|---|
+| `assistant/graph.py` | Wires the graph; every dependency can be injected through `build(...)` |
+| `assistant/nodes.py` | The nodes and the router, plus `Node` name constants |
+| `assistant/models.py` | `State`, `Passage` and `EvalItem` types |
+| `assistant/config.py` | `MAX_BOOKING_ATTEMPTS` and `TOP_K` |
+| `assistant/retrieval.py` / `metrics.py` | The retrievers and `recall_at_k` |
+| `assistant/alerts.py` | Where outages are reported (logs today) |
+| `service.py`, `deploy/` | HTTP service and container/ECS Fargate setup (see `deploy/README.md`) |
+| `unit_tests/` | Extra tests; `tests/` stays untouched for the exercise check |
+
+```bash
+docker compose run --rm check                                                  # exercise checks
+docker compose run --rm check python -m unittest discover -s unit_tests -t .  # unit tests
+docker build -f deploy/Dockerfile -t rebooking-assistant:local .               # service image
+```

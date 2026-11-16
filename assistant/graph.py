@@ -1,84 +1,47 @@
-"""The rebooking assistant as a LangGraph graph: find the fare rules, check seats, write the answer."""
+"""The rebooking assistant as a LangGraph graph: find the fare rules, check seats, write the answer.
 
-from typing import TypedDict
+    find_rules -> check_seats --ok--> write_answer -> END
+                    ^   |                 ^
+                    +---+ retry           |
+                        +--> booking_down-+   (after max attempts: alert a human)
+"""
+
+from collections.abc import Sequence
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
-from assistant import alerts, booking, llm
+from assistant import config
+from assistant.alerts import Notifier
 from assistant.data import PASSAGES
-from assistant.retrieval import CHOSEN_RETRIEVER, RETRIEVERS
-
-# How many times to ask the booking system before giving up and alerting someone.
-MAX_BOOKING_ATTEMPTS = 3
-
-
-class State(TypedDict, total=False):
-    question: str
-    flight: str
-    passages: list
-    sources: list
-    seats: int | None
-    booking_failed: bool
-    booking_attempts: int
-    alert_sent: bool
-    answer: str
+from assistant.models import Passage, State
+from assistant.nodes import (Node, SeatLookup, make_booking_down, make_check_seats, make_find_rules,
+                             make_route_after_check_seats, write_answer)
+from assistant.retrieval import CHOSEN_RETRIEVER, RETRIEVERS, Retriever
 
 
-def find_rules(state):
-    passages = RETRIEVERS[CHOSEN_RETRIEVER](state["question"], PASSAGES, 3)
-    return {"passages": passages, "sources": [p["id"] for p in passages]}
-
-
-def check_seats(state):
-    attempts = state.get("booking_attempts", 0) + 1
-    try:
-        seats = booking.free_seats(state["flight"])
-        return {"seats": seats, "booking_failed": False, "booking_attempts": attempts}
-    except booking.BookingSystemDown:
-        return {"seats": None, "booking_failed": True, "booking_attempts": attempts}
-
-
-def make_after_check_seats(max_attempts: int):
-    """Route after each try: retry while attempts remain, then alert instead of looping forever."""
-    def after_check_seats(state):
-        if not state["booking_failed"]:
-            return "write_answer"
-        if state["booking_attempts"] < max_attempts:
-            return "check_seats"
-        return "booking_down"
-    return after_check_seats
-
-
-def booking_down(state):
-    """Booking system gave up: tell a human, then let write_answer reply without seats."""
-    alerts.notify(f"Booking system down for flight {state['flight']} "
-                  f"after {state['booking_attempts']} attempts")
-    return {"alert_sent": True}
-
-
-def write_answer(state):
-    """Reads `sources` saved by find_rules two steps earlier, so the reply cites what it used."""
-    answer = llm.write_answer(state["question"], state["passages"], state["seats"])
-    sources = state.get("sources", [])
-    if sources:
-        answer = f"{answer} Sources: {', '.join(sources)}."
-    return {"answer": answer}
-
-
-def build(max_booking_attempts: int = MAX_BOOKING_ATTEMPTS):
+def build(max_booking_attempts: int = config.MAX_BOOKING_ATTEMPTS, *,
+          retriever: Retriever | None = None,
+          passages: Sequence[Passage] = PASSAGES,
+          top_k: int = config.TOP_K,
+          free_seats: SeatLookup | None = None,
+          notify: Notifier | None = None) -> CompiledStateGraph:
+    """Wire the graph. Every dependency has a production default and can be replaced in tests."""
     g = StateGraph(State)
-    g.add_node("find_rules", find_rules)
-    g.add_node("check_seats", check_seats)
-    g.add_node("booking_down", booking_down)
-    g.add_node("write_answer", write_answer)
-    g.add_edge(START, "find_rules")
-    g.add_edge("find_rules", "check_seats")
-    g.add_conditional_edges("check_seats", make_after_check_seats(max_booking_attempts),
-                            ["check_seats", "booking_down", "write_answer"])
-    g.add_edge("booking_down", "write_answer")
-    g.add_edge("write_answer", END)
+    g.add_node(Node.FIND_RULES, make_find_rules(retriever or RETRIEVERS[CHOSEN_RETRIEVER], passages, top_k))
+    g.add_node(Node.CHECK_SEATS, make_check_seats(free_seats))
+    g.add_node(Node.BOOKING_DOWN, make_booking_down(notify))
+    g.add_node(Node.WRITE_ANSWER, write_answer)
+
+    g.add_edge(START, Node.FIND_RULES)
+    g.add_edge(Node.FIND_RULES, Node.CHECK_SEATS)
+    g.add_conditional_edges(Node.CHECK_SEATS, make_route_after_check_seats(max_booking_attempts),
+                            [Node.CHECK_SEATS, Node.BOOKING_DOWN, Node.WRITE_ANSWER])
+    g.add_edge(Node.BOOKING_DOWN, Node.WRITE_ANSWER)
+    g.add_edge(Node.WRITE_ANSWER, END)
     return g.compile()
 
 
-def ask(question, flight):
+def ask(question: str, flight: str) -> State:
+    """Answer one gate-agent question about one flight."""
     return build().invoke({"question": question, "flight": flight})
