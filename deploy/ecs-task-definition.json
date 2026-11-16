@@ -1,0 +1,39 @@
+{
+  "family": "rebooking-assistant",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": { "operatingSystemFamily": "LINUX", "cpuArchitecture": "X86_64" },
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/rebooking-assistant-execution",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/rebooking-assistant-task",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/rebooking-assistant:<GIT_SHA>",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
+      "environment": [
+        { "name": "PORT", "value": "8080" },
+        { "name": "LOG_LEVEL", "value": "INFO" }
+      ],
+      "healthCheck": {
+        "command": ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"],
+        "interval": 15,
+        "timeout": 3,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "stopTimeout": 30,
+      "readonlyRootFilesystem": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/rebooking-assistant",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "app"
+        }
+      }
+    }
+  ]
+}
